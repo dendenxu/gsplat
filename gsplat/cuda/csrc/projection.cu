@@ -674,7 +674,7 @@ fully_fused_projection_fwd_kernel(const uint32_t C, const uint32_t N,
 
     float compensation;
     float det = add_blur(eps2d, covar2d, compensation);
-    if (det <= 0.f) {
+    if (det <= 0.f || covar2d[0][0] <= 0.0f || covar2d[1][1] <= 0.0f) {
         radii[idx] = 0;
         return;
     }
@@ -686,6 +686,14 @@ fully_fused_projection_fwd_kernel(const uint32_t C, const uint32_t N,
     // take 3 sigma as the radius (non differentiable)
     float b = 0.5f * (covar2d[0][0] + covar2d[1][1]);
     float v1 = b + sqrt(max(0.01f, b * b - det));
+    float v2 = b - sqrt(max(0.01f, b * b - det));
+
+    if (v1 <= 0.01 || v2 <= 0.01 || v1 < v2 || (v1 / v2) > 10000.0) {
+        // Illegal cov matrix, this point should be pruned with zero gradients
+        radii[idx] = 0;
+        return;
+    }
+
     float radius = ceil(3.f * sqrt(v1));
     // float v2 = b - sqrt(max(0.1f, b * b - det));
     // float radius = ceil(3.f * sqrt(max(v1, v2)));
