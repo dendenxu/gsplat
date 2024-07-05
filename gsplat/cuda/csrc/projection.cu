@@ -703,9 +703,10 @@ fully_fused_projection_fwd_kernel(const uint32_t C, const uint32_t N,
         return;
     }
 
+    const float padding = 0.0;
     // mask out gaussians outside the image region
-    if (mean2d.x + radius <= 0 || mean2d.x - radius >= image_width ||
-        mean2d.y + radius <= 0 || mean2d.y - radius >= image_height) {
+    if (mean2d.x + radius <= -(padding * image_width) || mean2d.x - radius >= image_width + padding * image_width ||
+        mean2d.y + radius <= -(padding * image_height) || mean2d.y - radius >= image_height + padding * image_height) {
         radii[idx] = 0;
         return;
     }
@@ -1087,7 +1088,6 @@ __global__ void fully_fused_projection_packed_fwd_kernel(
     glm::mat2 covar2d_inv;
     float compensation;
     float det;
-    float radius;
     if (valid) {
         // transform Gaussian covariance to camera space
         glm::mat3 covar;
@@ -1115,7 +1115,6 @@ __global__ void fully_fused_projection_packed_fwd_kernel(
 
         det = add_blur(eps2d, covar2d, compensation);
         if (det <= 0.f || covar2d[0][0] <= 0.0f || covar2d[1][1] <= 0.0f) {
-            radius = -1.0;
             valid = false;
         } else {
             // compute the inverse of the 2d covariance
@@ -1124,6 +1123,7 @@ __global__ void fully_fused_projection_packed_fwd_kernel(
     }
 
     // check if the points are in the image region
+    float radius;
     if (valid) {
         // take 3 sigma as the radius (non differentiable)
         float b = 0.5f * (covar2d[0][0] + covar2d[1][1]);
@@ -1133,7 +1133,6 @@ __global__ void fully_fused_projection_packed_fwd_kernel(
 
         if (v1 <= 0.01 || v2 <= 0.01 || v1 < v2 || (v1 / v2) > 10000.0) {
             // Illegal cov matrix, this point should be pruned with zero gradients
-            radius = -1.0;
             valid = false;
         }
 
@@ -1141,9 +1140,10 @@ __global__ void fully_fused_projection_packed_fwd_kernel(
             valid = false;
         }
 
+        const float padding = 0.0;
         // mask out gaussians outside the image region
-        if (mean2d.x + radius <= 0 || mean2d.x - radius >= image_width ||
-            mean2d.y + radius <= 0 || mean2d.y - radius >= image_height) {
+        if (mean2d.x + radius <= -(padding * image_width) || mean2d.x - radius >= image_width + padding * image_width ||
+            mean2d.y + radius <= -(padding * image_height) || mean2d.y - radius >= image_height + padding * image_height) {
             valid = false;
         }
     }
