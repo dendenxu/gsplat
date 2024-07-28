@@ -15,14 +15,15 @@ import tyro
 import viser
 from datasets.colmap import Dataset, Parser
 from datasets.traj import generate_interpolated_path
+from simple_trainer import create_splats_with_optimizers
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
+from utils import AppearanceOptModule, CameraOptModule, set_random_seed
 
 from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy
+from gsplat.strategy import MCMCStrategy
 
 
 @dataclass
@@ -71,9 +72,9 @@ class Config:
     # Turn on another SH degree every this steps
     sh_degree_interval: int = 1000
     # Initial opacity of GS
-    init_opa: float = 0.1
+    init_opa: float = 0.5
     # Initial scale of GS
-    init_scale: float = 1.0
+    init_scale: float = 0.1
     # Weight for SSIM loss
     ssim_lambda: float = 0.2
 
@@ -82,21 +83,19 @@ class Config:
     # Far plane clipping distance
     far_plane: float = 1e10
 
-    # GSs with opacity below this value will be pruned
-    prune_opa: float = 0.005
-    # GSs with image plane gradient above this value will be split/duplicated
-    grow_grad2d: float = 0.0002
-    # GSs with scale below this value will be duplicated. Above will be split
-    grow_scale3d: float = 0.01
-    # GSs with scale above this value will be pruned.
-    prune_scale3d: float = 0.1
+    # Maximum number of GSs.
+    cap_max: int = 1_000_000
+    # MCMC samping noise learning rate
+    noise_lr = 5e5
+    # Opacity regularization
+    opacity_reg = 0.01
+    # Scale regularization
+    scale_reg = 0.01
 
     # Start refining GSs after this iteration
     refine_start_iter: int = 500
     # Stop refining GSs after this iteration
-    refine_stop_iter: int = 15_000
-    # Reset opacities every this steps
-    reset_every: int = 3000
+    refine_stop_iter: int = 25_000
     # Refine GSs every this steps
     refine_every: int = 100
 
@@ -108,8 +107,6 @@ class Config:
     absgrad: bool = False
     # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
     antialiased: bool = False
-    # Whether to use revised opacity heuristic from arXiv:2404.06109 (experimental)
-    revised_opacity: bool = False
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
@@ -149,76 +146,7 @@ class Config:
         self.sh_degree_interval = int(self.sh_degree_interval * factor)
         self.refine_start_iter = int(self.refine_start_iter * factor)
         self.refine_stop_iter = int(self.refine_stop_iter * factor)
-        self.reset_every = int(self.reset_every * factor)
         self.refine_every = int(self.refine_every * factor)
-
-
-def create_splats_with_optimizers(
-    parser: Parser,
-    init_type: str = "sfm",
-    init_num_pts: int = 100_000,
-    init_extent: float = 3.0,
-    init_opacity: float = 0.1,
-    init_scale: float = 1.0,
-    scene_scale: float = 1.0,
-    sh_degree: int = 3,
-    sparse_grad: bool = False,
-    batch_size: int = 1,
-    feature_dim: Optional[int] = None,
-    device: str = "cuda",
-) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-    if init_type == "sfm":
-        points = torch.from_numpy(parser.points).float()
-        rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()
-    elif init_type == "random":
-        points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
-        rgbs = torch.rand((init_num_pts, 3))
-    else:
-        raise ValueError("Please specify a correct init_type: sfm or random")
-
-    N = points.shape[0]
-    # Initialize the GS size to be the average dist of the 3 nearest neighbors
-    dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
-    dist_avg = torch.sqrt(dist2_avg)
-    scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
-    quats = torch.rand((N, 4))  # [N, 4]
-    opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
-
-    params = [
-        # name, value, lr
-        ("means", torch.nn.Parameter(points), 1.6e-4 * scene_scale),
-        ("scales", torch.nn.Parameter(scales), 5e-3),
-        ("quats", torch.nn.Parameter(quats), 1e-3),
-        ("opacities", torch.nn.Parameter(opacities), 5e-2),
-    ]
-
-    if feature_dim is None:
-        # color is SH coefficients.
-        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, K, 3]
-        colors[:, 0, :] = rgb_to_sh(rgbs)
-        params.append(("sh0", torch.nn.Parameter(colors[:, :1, :]), 2.5e-3))
-        params.append(("shN", torch.nn.Parameter(colors[:, 1:, :]), 2.5e-3 / 20))
-    else:
-        # features will be used for appearance and view-dependent shading
-        features = torch.rand(N, feature_dim)  # [N, feature_dim]
-        params.append(("features", torch.nn.Parameter(features), 2.5e-3))
-        colors = torch.logit(rgbs)  # [N, 3]
-        params.append(("colors", torch.nn.Parameter(colors), 2.5e-3))
-
-    splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
-    # Scale learning rate based on batch size, reference:
-    # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
-    # Note that this would not make the training exactly equivalent, see
-    # https://arxiv.org/pdf/2402.18824v1
-    optimizers = {
-        name: (torch.optim.SparseAdam if sparse_grad else torch.optim.Adam)(
-            [{"params": splats[name], "lr": lr * math.sqrt(batch_size)}],
-            eps=1e-15 / math.sqrt(batch_size),
-            betas=(1 - batch_size * (1 - 0.9), 1 - batch_size * (1 - 0.999)),
-        )
-        for name, _, lr in params
-    }
-    return splats, optimizers
 
 
 class Runner:
@@ -280,20 +208,13 @@ class Runner:
         print("Model initialized. Number of GS:", len(self.splats["means"]))
 
         # Densification Strategy
-        self.strategy = DefaultStrategy(
+        self.strategy = MCMCStrategy(
             verbose=True,
-            scene_scale=self.scene_scale,
-            prune_opa=cfg.prune_opa,
-            grow_grad2d=cfg.grow_grad2d,
-            grow_scale3d=cfg.grow_scale3d,
-            prune_scale3d=cfg.prune_scale3d,
-            # refine_scale2d_stop_iter=4000, # splatfacto behavior
+            cap_max=cfg.cap_max,
+            noise_lr=cfg.noise_lr,
             refine_start_iter=cfg.refine_start_iter,
             refine_stop_iter=cfg.refine_stop_iter,
-            reset_every=cfg.reset_every,
             refine_every=cfg.refine_every,
-            absgrad=cfg.absgrad,
-            revised_opacity=cfg.revised_opacity,
         )
         self.strategy.check_sanity(self.splats, self.optimizers)
         self.strategy_state = self.strategy.initialize_state()
@@ -491,14 +412,6 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
-            self.strategy.step_pre_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                state=self.strategy_state,
-                step=step,
-                info=info,
-            )
-
             # loss
             l1loss = F.l1_loss(colors, pixels)
             ssimloss = 1.0 - self.ssim(
@@ -524,6 +437,16 @@ class Runner:
                 disp_gt = 1.0 / depths_gt  # [1, M]
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
+
+            loss = (
+                loss
+                + cfg.opacity_reg
+                * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
+            )
+            loss = (
+                loss
+                + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
+            )
 
             loss.backward()
 
@@ -557,6 +480,7 @@ class Runner:
                 state=self.strategy_state,
                 step=step,
                 info=info,
+                lr=schedulers[0].get_last_lr()[0],
             )
 
             # Turn Gradients into Sparse Tensor before running optimizer
