@@ -57,7 +57,7 @@ fully_fused_projection_fwd_kernel(const uint32_t C, const uint32_t N,
     vec3<T> mean_c;
     pos_world_to_cam(R, t, glm::make_vec3(means), mean_c);
     if (mean_c.z < near_plane || mean_c.z > far_plane) {
-        radii[idx] = 0;
+        radii[idx] = -1.0; // these points should be pruned
         return;
     }
 
