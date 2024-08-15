@@ -57,7 +57,7 @@ fully_fused_projection_fwd_kernel(const uint32_t C, const uint32_t N,
     vec3<T> mean_c;
     pos_world_to_cam(R, t, glm::make_vec3(means), mean_c);
     if (mean_c.z < near_plane || mean_c.z > far_plane) {
-        radii[idx] = max(image_width, image_height); // these points should be pruned
+        radii[idx] = -1.0; // these points should be pruned
         return;
     }
 
@@ -88,7 +88,7 @@ fully_fused_projection_fwd_kernel(const uint32_t C, const uint32_t N,
     T compensation;
     T det = add_blur(eps2d, covar2d, compensation);
     if (det <= 0.f || covar2d[0][0] <= 0.0f || covar2d[1][1] <= 0.0f) {
-        radii[idx] = max(image_width, image_height);  // invalid gaussians
+        radii[idx] = -1.0;  // invalid gaussians
         return;
     }
 
@@ -104,7 +104,7 @@ fully_fused_projection_fwd_kernel(const uint32_t C, const uint32_t N,
 
     if (v1 <= 0.01 || v2 <= 0.01 || v1 < v2 || (v1 / v2) > 10000.0) {
         // Illegal cov matrix, this point should be pruned with zero gradients
-        radii[idx] = max(image_width, image_height);  // invalid gaussians
+        radii[idx] = -1.0;  // invalid gaussians
         return;
     }
 
