@@ -236,6 +236,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids   // [n_isects]
 );
+// Rasterize 3D Gaussian to pixels with per-group compositing (shared T)
+std::tuple<at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_grouped_fwd(
+    const at::Tensor means2d,
+    const at::Tensor conics,
+    const at::Tensor colors,
+    const at::Tensor opacities,
+    const at::Tensor group_ids,
+    const at::Tensor group_weights,
+    const at::optional<at::Tensor> backgrounds,
+    const at::optional<at::Tensor> masks,
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size,
+    const at::Tensor tile_offsets,
+    const at::Tensor flatten_ids,
+    const uint32_t num_groups
+);
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_3dgs_bwd(
     // Gaussian parameters

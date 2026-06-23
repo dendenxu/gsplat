@@ -114,6 +114,90 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     return std::make_tuple(renders, alphas, last_ids);
 }
 
+std::tuple<at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_grouped_fwd(
+    const at::Tensor means2d,
+    const at::Tensor conics,
+    const at::Tensor colors,
+    const at::Tensor opacities,
+    const at::Tensor group_ids,
+    const at::Tensor group_weights,
+    const at::optional<at::Tensor> backgrounds,
+    const at::optional<at::Tensor> masks,
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size,
+    const at::Tensor tile_offsets,
+    const at::Tensor flatten_ids,
+    const uint32_t num_groups
+) {
+    DEVICE_GUARD(means2d);
+    CHECK_INPUT(means2d);
+    CHECK_INPUT(conics);
+    CHECK_INPUT(colors);
+    CHECK_INPUT(opacities);
+    CHECK_INPUT(group_ids);
+    CHECK_INPUT(group_weights);
+    CHECK_INPUT(tile_offsets);
+    CHECK_INPUT(flatten_ids);
+    if (backgrounds.has_value()) {
+        CHECK_INPUT(backgrounds.value());
+    }
+    if (masks.has_value()) {
+        CHECK_INPUT(masks.value());
+    }
+
+    auto opt = means2d.options();
+    at::DimVector image_dims(tile_offsets.sizes().slice(0, tile_offsets.dim() - 2));
+    uint32_t channels = colors.size(-1);
+
+    at::DimVector renders_dims(image_dims);
+    renders_dims.append({image_height, image_width, channels});
+    at::Tensor renders = at::empty(renders_dims, opt);
+
+    at::DimVector alphas_dims(image_dims);
+    alphas_dims.append({image_height, image_width, 1});
+    at::Tensor alphas = at::empty(alphas_dims, opt);
+
+#define __LAUNCH_GROUPED__(N)                                                  \
+    case N:                                                                    \
+        launch_rasterize_to_pixels_3dgs_grouped_fwd_kernel<N>(                 \
+            means2d, conics, colors, opacities,                                \
+            group_ids, group_weights,                                          \
+            backgrounds, masks,                                                \
+            image_width, image_height, tile_size,                              \
+            tile_offsets, flatten_ids, num_groups,                              \
+            renders, alphas                                                    \
+        );                                                                     \
+        break;
+
+    switch (channels) {
+        __LAUNCH_GROUPED__(1)
+        __LAUNCH_GROUPED__(2)
+        __LAUNCH_GROUPED__(3)
+        __LAUNCH_GROUPED__(4)
+        __LAUNCH_GROUPED__(5)
+        __LAUNCH_GROUPED__(8)
+        __LAUNCH_GROUPED__(9)
+        __LAUNCH_GROUPED__(16)
+        __LAUNCH_GROUPED__(17)
+        __LAUNCH_GROUPED__(32)
+        __LAUNCH_GROUPED__(33)
+        __LAUNCH_GROUPED__(64)
+        __LAUNCH_GROUPED__(65)
+        __LAUNCH_GROUPED__(128)
+        __LAUNCH_GROUPED__(129)
+        __LAUNCH_GROUPED__(256)
+        __LAUNCH_GROUPED__(257)
+        __LAUNCH_GROUPED__(512)
+        __LAUNCH_GROUPED__(513)
+    default:
+        AT_ERROR("Unsupported number of channels: ", channels);
+    }
+#undef __LAUNCH_GROUPED__
+
+    return std::make_tuple(renders, alphas);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_3dgs_bwd(
     // Gaussian parameters

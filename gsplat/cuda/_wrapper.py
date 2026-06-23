@@ -676,6 +676,87 @@ def rasterize_to_pixels(
     return render_colors, render_alphas
 
 
+def rasterize_to_pixels_grouped(
+    means2d: Tensor,  # [nnz, 2]
+    conics: Tensor,  # [nnz, 3]
+    colors: Tensor,  # [nnz, channels]
+    opacities: Tensor,  # [nnz]
+    group_ids: Tensor,  # [nnz] int32, source view index per Gaussian
+    group_weights: Tensor,  # [I, K] blend weight per image per group
+    image_width: int,
+    image_height: int,
+    tile_size: int,
+    isect_offsets: Tensor,  # [..., tile_height, tile_width]
+    flatten_ids: Tensor,  # [n_isects]
+    backgrounds: Optional[Tensor] = None,
+    masks: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor]:
+    """Rasterize Gaussians with per-group compositing and in-kernel smooth blend.
+
+    Uses shared transmittance for correct occlusion, per-group color accumulators
+    for clean per-view rendering, and weighted blend in the kernel.
+
+    Args:
+        group_ids: Per-Gaussian group assignment (int32, 0..K-1).
+        group_weights: Blend weights per image per group [I, K].
+        (other args same as rasterize_to_pixels)
+
+    Returns:
+        render_colors: [..., H, W, channels] — blended result.
+        render_alphas: [..., H, W, 1]
+    """
+    channels = colors.shape[-1]
+    device = means2d.device
+    num_groups = group_weights.shape[-1]
+
+    assert group_ids.dtype == torch.int32, f"group_ids must be int32, got {group_ids.dtype}"
+    assert num_groups <= 16, f"num_groups must be <= 16, got {num_groups}"
+
+    if backgrounds is not None:
+        backgrounds = backgrounds.contiguous()
+    if masks is not None:
+        masks = masks.contiguous()
+
+    # Pad channels if needed (same logic as rasterize_to_pixels)
+    supported = (1,2,3,4,5,8,9,16,17,32,33,64,65,128,129,256,257,512,513)
+    if channels not in supported:
+        padded_channels = (1 << (channels - 1).bit_length()) - channels
+        colors = torch.cat(
+            [colors, torch.zeros(*colors.shape[:-1], padded_channels, device=device)],
+            dim=-1,
+        )
+        if backgrounds is not None:
+            backgrounds = torch.cat(
+                [backgrounds, torch.zeros(*backgrounds.shape[:-1], padded_channels, device=device)],
+                dim=-1,
+            )
+    else:
+        padded_channels = 0
+
+    render_colors, render_alphas = _make_lazy_cuda_func(
+        "rasterize_to_pixels_3dgs_grouped_fwd"
+    )(
+        means2d.contiguous(),
+        conics.contiguous(),
+        colors.contiguous(),
+        opacities.contiguous(),
+        group_ids.contiguous(),
+        group_weights.contiguous(),
+        backgrounds,
+        masks,
+        image_width,
+        image_height,
+        tile_size,
+        isect_offsets.contiguous(),
+        flatten_ids.contiguous(),
+        num_groups,
+    )
+
+    if padded_channels > 0:
+        render_colors = render_colors[..., :-padded_channels]
+    return render_colors, render_alphas
+
+
 def rasterize_to_pixels_eval3d(
     means: Tensor,  # [..., N, 3]
     quats: Tensor,  # [..., N, 4]

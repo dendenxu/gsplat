@@ -38,6 +38,26 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
 );
 
 template <uint32_t CDIM>
+void launch_rasterize_to_pixels_3dgs_grouped_fwd_kernel(
+    const at::Tensor means2d,
+    const at::Tensor conics,
+    const at::Tensor colors,
+    const at::Tensor opacities,
+    const at::Tensor group_ids,
+    const at::Tensor group_weights,
+    const at::optional<at::Tensor> backgrounds,
+    const at::optional<at::Tensor> masks,
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size,
+    const at::Tensor tile_offsets,
+    const at::Tensor flatten_ids,
+    const uint32_t num_groups,
+    at::Tensor renders,
+    at::Tensor alphas
+);
+
+template <uint32_t CDIM>
 void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     // Gaussian parameters
     const at::Tensor means2d,                   // [..., N, 2] or [nnz, 2]
